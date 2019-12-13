@@ -32,6 +32,8 @@ TOPBUTTON = "zulipterminal.ui_tools.buttons.TopButton"
 STREAMBUTTON = "zulipterminal.ui_tools.buttons.StreamButton"
 MESSAGEBOX = "zulipterminal.ui_tools.boxes.MessageBox"
 
+SERVER_URL = "https://chat.zulip.zulip"
+
 
 class TestModListWalker:
     @pytest.fixture
@@ -401,8 +403,6 @@ class TestStreamsView:
 
     @pytest.fixture
     def stream_view(self, mocker):
-        self.log = mocker.patch(VIEWS + ".urwid.SimpleFocusListWalker",
-                                return_value=[])
         mocker.patch(VIEWS + ".urwid.connect_signal")
         mocker.patch(VIEWS + ".threading.Lock")
         self.view = mocker.Mock()
@@ -414,7 +414,6 @@ class TestStreamsView:
 
     def test_init(self, mocker, stream_view):
         assert stream_view.view == self.view
-        assert stream_view.log == []
         assert stream_view.streams_btn_list == self.streams_btn_list
         assert stream_view.stream_search_box
         self.stream_search_box.assert_called_once_with(
@@ -465,6 +464,41 @@ class TestStreamsView:
         stream_view.keypress(size, key)
         stream_view.set_focus.assert_called_once_with("body")
         assert stream_view.log == self.streams_btn_list
+
+    @pytest.mark.parametrize('current_focus, stream', [
+        (0, 'FOO'),
+        (2, 'fan'),
+        (4, 'BOO'),
+    ])
+    def test_return_to_focus_after_search(self, mocker, stream_view,
+                                          current_focus, stream):
+        # Initialize log
+        stream_view.streams_btn_list = [
+            mocker.Mock(stream_name=stream_name) for stream_name in [
+                'FOO', 'foo', 'fan', 'boo', 'BOO']]
+        stream_view.log.extend(stream_view.streams_btn_list)
+
+        # Set initial stream focus to 'current_focus' and name to 'stream'
+        stream_view.log.set_focus(current_focus)
+        stream_view.focus_index_before_search = current_focus
+        previous_focus = stream_view.log.get_focus()[1]
+        previous_focus_stream_name = stream
+
+        # Toggle Stream Search
+        key = "q"
+        size = (20,)
+        stream_view.keypress(size, key)
+
+        # Exit Stream Search
+        key = "esc"
+        size = (20,)
+        stream_view.keypress(size, key)
+
+        # Obtain new stream focus
+        new_focus = stream_view.log.get_focus()[1]
+        new_focus_stream_name = stream_view.log[new_focus].stream_name
+        assert new_focus == previous_focus
+        assert previous_focus_stream_name == new_focus_stream_name
 
 
 class TestTopicsView:
@@ -1244,10 +1278,17 @@ class TestMessageBox:
         ('<blockquote>stuff', [('blockquote', ['', 'stuff'])]),
         ('<div class="message_embed">',
             ['[EMBEDDED CONTENT NOT RENDERED]']),  # FIXME Unsupported
-        ('<a href="foo">foo</a>', ['foo']),  # FIXME? Render with link style?
-        ('<a href="foo">bar</a>', [('link', '[bar](foo)')]),
+        ('<a href="http://foo">http://foo</a>', [('link', 'http://foo')]),
+        ('<a href="http://foo/bar.png">http://foo/bar.png</a>',
+            [('link', 'http://foo/bar.png')]),
+        ('<a href="http://foo">bar</a>', [('link', '[bar](http://foo)')]),
         ('<a href="/user_uploads/blah"',
-            [('link', '[](SOME_BASE_URL/user_uploads/blah)')]),
+            [('link', '[]({}/user_uploads/blah)'.format(SERVER_URL))]),
+        ('<a href="/api"',
+            [('link', '[]({}/api)'.format(SERVER_URL))]),
+        ('<a href="some/relative_url">{}/some/relative_url</a>'
+         .format(SERVER_URL),
+            [('link', '{}/some/relative_url'.format(SERVER_URL))]),
         ('<li>Something', ['  * ', '', 'Something']),
         ('<li>Something<li>else',  # NOTE Real items are newline-separated?
             ['  * ', '', 'Something', '  * ', '', 'else']),
@@ -1262,9 +1303,8 @@ class TestMessageBox:
         ('<ul><li>text</li></ul>', ['', '  * ', '', 'text']),
         ('<del>text</del>', ['', 'text']),  # FIXME Strikethrough
         ('<div class="message_inline_image">'
-         '<a href="x"><img src="x"></a></div>', ['', 'x']),
-        ('<div class="message_inline_ref">blah</div>',
-            ['[MESSAGE INLINE REF NOT RENDERED]']),
+         '<a href="x"><img src="x"></a></div>', []),
+        ('<div class="message_inline_ref">blah</div>', []),
         ('<span class="emoji">:smile:</span>', [':smile:']),
         ('<div class="inline-preview-twitter"',
             ['[TWITTER PREVIEW NOT RENDERED]']),
@@ -1273,8 +1313,10 @@ class TestMessageBox:
     ], ids=[
         'empty', 'p', 'user-mention', 'group-mention', 'code', 'codehilite',
         'strong', 'em', 'blockquote',
-        'embedded_content', 'link_sametext', 'link_differenttext',
-        'link_userupload', 'listitem', 'listitems',
+        'embedded_content',
+        'link_sametext', 'link_sameimage', 'link_differenttext',
+        'link_userupload', 'link_api', 'link_serverrelative_same',
+        'listitem', 'listitems',
         'br', 'br2', 'hr', 'hr2', 'img', 'img2', 'table', 'math', 'math2',
         'ul', 'strikethrough_del', 'inline_image', 'inline_ref',
         'emoji', 'preview-twitter', 'zulip_extra_emoji', 'custom_emoji'
@@ -1284,13 +1326,13 @@ class TestMessageBox:
                        sender_email='foo@zulip.com', id=4, sender_id=4209,
                        type='stream',  # NOTE Output should not vary with PM
                        flags=[], content=content, sender_full_name='bob smith',
-                       timestamp=99, reactions=[])
+                       is_me_message=False, timestamp=99, reactions=[])
         self.model.stream_dict = {
             5: {  # matches stream_id above
                 'color': '#bd6',
             },
         }
-        self.model.server_url = "SOME_BASE_URL"
+        self.model.server_url = SERVER_URL
         # NOTE Absence of previous (last) message should not affect markup
         msg_box = MessageBox(message, self.model, None)
 
@@ -1370,7 +1412,40 @@ class TestMessageBox:
             'display_recipient': 'Verona',
             'stream_id': 5,
             'subject': 'Test topic',
+            'is_me_message': True,  # will be overridden by test function.
             'flags': [],
+            'content': '',  # will be overridden by test function.
+            'reactions': [],
+            'sender_full_name': 'Alice',
+            'timestamp': 1532103879,
+        }
+    ])
+    @pytest.mark.parametrize('content, is_me_message', [
+        ('<p>/me is excited!</p>', True),
+        ('<p>/me is excited! /me is not excited.</p>', True),
+        ('<p>This is /me not.</p>', False),
+        ('<p>/me is excited!</p>', False),
+    ])
+    def test_main_view_renders_slash_me(self, mocker, message, content,
+                                        is_me_message):
+        mocker.patch(VIEWS + ".urwid.Text")
+        message['content'] = content
+        message['is_me_message'] = is_me_message
+        msg_box = MessageBox(message, self.model, message)
+        msg_box.main_view()
+        name_index = 11 if is_me_message else -1  # 11 = len(<str><strong>)
+        assert msg_box.message['content'].find(
+            message['sender_full_name']) == name_index
+
+    @pytest.mark.parametrize('message', [
+        {
+            'id': 4,
+            'type': 'stream',
+            'display_recipient': 'Verona',
+            'stream_id': 5,
+            'subject': 'Test topic',
+            'flags': [],
+            'is_me_message': False,
             'content': '<p>what are you planning to do this week</p>',
             'reactions': [],
             'sender_full_name': 'Alice',
@@ -1415,6 +1490,7 @@ class TestMessageBox:
                 'full_name': 'Iago'
             }],
             'flags': [],
+            'is_me_message': False,
             'content': '<p>what are you planning to do this week</p>',
             'reactions': [],
             'sender_full_name': 'Alice',
@@ -1501,6 +1577,7 @@ class TestMessageBox:
             'stream_id': 5,
             'subject': 'Test topic',
             'flags': [],
+            'is_me_message': False,
             'content': '<p>what are you planning to do this week</p>',
             'reactions': [],
             'sender_full_name': 'alice',

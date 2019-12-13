@@ -3,6 +3,7 @@ from time import ctime, time
 from datetime import datetime
 from sys import platform
 from typing import Any, Dict, List, Tuple, Union, Optional
+from urllib.parse import urlparse, urljoin
 
 import emoji
 import urwid
@@ -383,7 +384,8 @@ class MessageBox(urwid.Pile):
             # TODO: Support embedded content & twitter preview?
             'message_embed': 'EMBEDDED CONTENT',
             'inline-preview-twitter': 'TWITTER PREVIEW',
-            'message_inline_ref': 'MESSAGE INLINE REF',
+            'message_inline_ref': '',  # Duplicate of other content
+            'message_inline_image': '',  # Duplicate of other content
         }
         unrendered_template = '[{} NOT RENDERED]'
         for element in soup:
@@ -434,16 +436,18 @@ class MessageBox(urwid.Pile):
                 # LINKS
                 link = element.attrs['href']
                 text = element.img['src'] if element.img else element.text
+
+                parsed_link = urlparse(link)
+                if not parsed_link.scheme:  # => relative link
+                    # Prepend org url to convert it to an absolute link
+                    link = urljoin(self.model.server_url, link)
+
                 if link == text:
                     # If the link and text are same
                     # usually the case when user just pastes
                     # a link then just display the link
-                    markup.append(text)
+                    markup.append(('link', text))
                 else:
-                    if link.startswith('/user_uploads/'):
-                        # Append org url to before user_uploads to convert it
-                        # into a link.
-                        link = self.model.server_url + link
                     markup.append(
                         ('link', '[' + text + ']' + '(' + link + ')'))
             elif element.name == 'blockquote':
@@ -532,6 +536,13 @@ class MessageBox(urwid.Pile):
                 ], dividechars=1)
         else:
             content_header = None
+
+        # If the message contains '/me' emote then replace it with
+        # sender's full name and show it in bold.
+        if self.message['is_me_message']:
+            self.message['content'] = self.message['content'].replace(
+                '/me',
+                '<strong>' + self.message['sender_full_name'] + '</strong>', 1)
 
         # Transform raw message content into markup (As needed by urwid.Text)
         active_char = '▒'  # Options are '█', '▓', '▒', '░'
